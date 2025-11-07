@@ -1,0 +1,6 @@
+requests
+numpy
+websocket-client
+flask
+flask-cors
+schedule

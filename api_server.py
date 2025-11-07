@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""
+api_server.py - API服务器
+
+提供REST API接口，从数据库快速返回异动数据
+"""
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import time
+from datetime import datetime
+from typing import Dict, List
+
+from database import db
+
+app = Flask(__name__)
+CORS(app)  # 允许跨域请求
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """健康检查接口"""
+    try:
+        stats = db.get_symbol_stats()
+        
+        # 获取数据库详细信息
+        size_info = db.get_data_size_info()
+        
+        return jsonify({
+            "status": "healthy",
+            "timestamp": int(time.time()),
+            "server_time": datetime.now().isoformat(),
+            "database": {
+                "file_size_mb": stats["file_size_mb"],
+                "max_age_hours": stats["max_age_hours"],
+                "symbol_count": stats["symbol_count"],
+                "kline_count": stats["kline_count"],
+                "anomaly_count_24h": stats["anomaly_count_24h"],
+                "auto_cleanup": db.auto_cleanup,
+                "cleanup_interval_hours": db.cleanup_interval // 3600,
+                "records": size_info["records"],
+                "oldest_data": size_info["oldest_data"]
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": int(time.time())
+        }), 500
+
+@app.route('/api/anomalies', methods=['GET'])
+def get_anomalies():
+    """获取异动数据接口"""
+    try:
+        # 解析查询参数
+        interval_type = request.args.get('interval', '15m')
+        hours = int(request.args.get('hours', 24))
+        limit = int(request.args.get('limit', 100))
+        min_score = float(request.args.get('min_score', 0.0))
+        anomaly_only = request.args.get('anomaly_only', 'false').lower() == 'true'
+        
+        # 从数据库获取数据
+        anomalies = db.get_recent_anomalies(interval_type, hours, limit * 2)  # 获取更多以便过滤
+        
+        # 应用过滤器
+        filtered_anomalies = []
+        for anomaly in anomalies:
+            # 分数过滤
+            if anomaly['anomaly_score'] < min_score:
+                continue
+            
+            # 仅异动过滤
+            if anomaly_only and anomaly['anomaly_reasons'] == '正常':
+                continue
+                
+            filtered_anomalies.append({
+                "symbol": anomaly['symbol'],
+                "timestamp": anomaly['timestamp'],
+                "datetime": datetime.fromtimestamp(anomaly['timestamp']).isoformat(),
+                "interval_type": anomaly['interval_type'],
+                
+                # 价格数据
+                "current_return_pct": round(anomaly['cur_return'] * 100, 3),
+                "close_price": anomaly['close_price'],
+                
+                # 成交量数据
+                "current_volume": anomaly['cur_volume'],
+                "current_volatility": anomaly['cur_volatility'],
+                
+                # 异动指标
+                "price_zscore": round(anomaly['price_zscore'], 2),
+                "price_percentile": round(anomaly['price_percentile'], 1),
+                "volume_zscore": round(anomaly['volume_zscore'], 2),
+                "volatility_zscore": round(anomaly['volatility_zscore'], 2),
+                
+                # 评分
+                "anomaly_score": round(anomaly['anomaly_score'], 3),
+                "price_score": round(anomaly['price_score'], 3),
+                "volume_score": round(anomaly['volume_score'], 3),
+                "volatility_score": round(anomaly['volatility_score'], 3),
+                
+                # 异动类型和成交额
+                "anomaly_reasons": anomaly['anomaly_reasons'],
+                "quote_volume_24h": anomaly['quote_volume_24h'],
+                
+                "created_at": anomaly['created_at']
+            })
+        
+        # 限制结果数量
+        filtered_anomalies = filtered_anomalies[:limit]
+        
+        return jsonify({
+            "status": "success",
+            "count": len(filtered_anomalies),
+            "data": filtered_anomalies,
+            "filters": {
+                "interval_type": interval_type,
+                "hours": hours,
+                "min_score": min_score,
+                "anomaly_only": anomaly_only
+            },
+            "timestamp": int(time.time())
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "timestamp": int(time.time())
+        }), 500
+
+@app.route('/api/anomalies/top', methods=['GET'])
+def get_top_anomalies():
+    """获取评分最高的异动数据"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        hours = int(request.args.get('hours', 24))
+        
+        # 获取数据并按评分排序
+        anomalies = db.get_recent_anomalies("15m", hours, limit * 3)
+        
+        # 过滤掉正常数据，只返回异动
+        top_anomalies = [
+            a for a in anomalies 
+            if a['anomaly_reasons'] != '正常' and a['anomaly_score'] > 0.5
+        ][:limit]
+        
+        result = []
+        for anomaly in top_anomalies:
+            result.append({
+                "rank": len(result) + 1,
+                "symbol": anomaly['symbol'],
+                "current_return_pct": round(anomaly['cur_return'] * 100, 2),
+                "anomaly_score": round(anomaly['anomaly_score'], 2),
+                "price_zscore": round(anomaly['price_zscore'], 2),
+                "volume_zscore": round(anomaly['volume_zscore'], 2),
+                "volatility_zscore": round(anomaly['volatility_zscore'], 2),
+                "quote_volume_24h": int(anomaly['quote_volume_24h']),
+                "anomaly_reasons": anomaly['anomaly_reasons'],
+                "datetime": datetime.fromtimestamp(anomaly['timestamp']).strftime('%H:%M:%S')
+            })
+        
+        return jsonify({
+            "status": "success",
+            "count": len(result),
+            "data": result,
+            "timestamp": int(time.time())
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error", 
+            "message": str(e)
+        }), 500
+
+@app.route('/api/symbols/<symbol>/klines', methods=['GET'])
+def get_symbol_klines(symbol):
+    """获取指定合约的K线数据"""
+    try:
+        limit = int(request.args.get('limit', 100))
+        
+        klines = db.get_recent_klines(symbol, limit)
+        
+        result = []
+        for kline in klines:
+            result.append({
+                "timestamp": kline['open_time'],
+                "datetime": datetime.fromtimestamp(kline['open_time'] // 1000).isoformat(),
+                "open": kline['open_price'],
+                "high": kline['high_price'],
+                "low": kline['low_price'],
+                "close": kline['close_price'],
+                "volume": kline['volume'],
+                "quote_volume": kline['quote_volume']
+            })
+        
+        return jsonify({
+            "status": "success",
+            "symbol": symbol,
+            "count": len(result),
+            "data": result
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/api/coins', methods=['GET'])
+def get_coins():
+    """获取高评分币种接口 - 用于AI选币决策（基于独立数据表）"""
+    try:
+        limit = int(request.args.get('limit',10))
+        # 从独立的ai_coins表获取数据
+        coins_data = db.get_ai_coins(limit)
+        
+        # 转换格式
+        coins = []
+        for coin in coins_data:
+            coin_result = {
+                "pair": coin['symbol'],
+                "score": round(coin['score'], 1),
+                "start_time": coin['start_time'],
+                "start_price": round(coin['start_price'], 4),
+                "last_score": round(coin['score'], 1),  # 当前就是最新评分
+                "max_score": round(coin['score'], 1),   # 简化为当前评分
+                "max_price": round(coin['max_price'], 4),
+                "increase_percent": round(coin['increase_percent'], 2)
+            }
+            coins.append(coin_result)
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "coins": coins,
+                "count": len(coins),
+                "last_update": coins_data[0]['updated_at'] if coins_data else int(time.time()),
+                "update_interval": "3分钟"
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/oitop', methods=['GET'])
+def get_oi_top():
+    """获取持仓量Top20接口 - 基于独立数据表快速响应"""
+    try:
+        limit = int(request.args.get('limit', 20))
+        
+        # 从独立的oi_rankings表获取数据
+        oi_data = db.get_oi_rankings(limit)
+        
+        # 转换格式
+        positions = []
+        for oi in oi_data:
+            position = {
+                "symbol": oi['symbol'],
+                "rank": oi['rank'],
+                "current_oi": round(oi['current_oi'], 2),
+                "oi_delta": round(oi['oi_delta'], 2),
+                "oi_delta_percent": round(oi['oi_delta_percent'], 2),
+                "oi_delta_value": round(oi['oi_delta_value'], 2),
+                "price_delta_percent": round(oi['price_delta_percent'], 2),
+                "net_long": round(oi['net_long'], 2),
+                "net_short": round(oi['net_short'], 2)
+            }
+            positions.append(position)
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "positions": positions,
+                "count": len(positions),
+                "exchange": "binance",
+                "time_range": "24h",
+                "last_update": oi_data[0]['updated_at'] if oi_data else int(time.time()),
+                "update_interval": "3分钟",
+                "note": "基于独立数据表，每3分钟更新"
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    """获取统计信息"""
+    try:
+        stats = db.get_symbol_stats()
+        
+        # 获取最近1小时的异动数量
+        recent_anomalies = db.get_recent_anomalies("15m", 1, 1000)
+        anomaly_count_1h = len([a for a in recent_anomalies if a['anomaly_reasons'] != '正常'])
+        
+        return jsonify({
+            "status": "success",
+            "data": {
+                "monitored_symbols": stats["symbol_count"],
+                "total_klines": stats["kline_count"],
+                "anomalies_24h": stats["anomaly_count_24h"],
+                "anomalies_1h": anomaly_count_1h,
+                "last_update": int(time.time())
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/', methods=['GET'])
+def index():
+    """首页 - API文档"""
+    return """
+    <h1>币安合约异动检测 API</h1>
+    <h2>可用接口：</h2>
+    <ul>
+        <li><code>GET /api/health</code> - 健康检查</li>
+        <li><code>GET /api/anomalies</code> - 获取异动数据
+            <ul>
+                <li>参数: interval=15m, hours=24, limit=100, min_score=0.0, anomaly_only=false</li>
+            </ul>
+        </li>
+        <li><code>GET /api/anomalies/top</code> - 获取评分最高的异动
+            <ul>
+                <li>参数: limit=20, hours=24</li>
+            </ul>
+        </li>
+        <li><code>GET /api/coins</code> - 获取高评分币种（AI选币决策）
+            <ul>
+                <li>返回评分、价格、涨幅等数据</li>
+            </ul>
+        </li>
+        <li><code>GET /api/oitop</code> - 获取持仓量Top20（市场热度分析）
+            <ul>
+                <li>参数: limit=20</li>
+                <li>返回持仓量、增长率、多空比等数据</li>
+            </ul>
+        </li>
+        <li><code>GET /api/symbols/{symbol}/klines</code> - 获取指定合约K线数据
+            <ul>
+                <li>参数: limit=100</li>
+            </ul>
+        </li>
+        <li><code>GET /api/stats</code> - 获取统计信息</li>
+    </ul>
+    
+    <h2>示例：</h2>
+    <ul>
+        <li><a href="/api/health">/api/health</a></li>
+        <li><a href="/api/coins">/api/coins</a> - AI选币接口</li>
+        <li><a href="/api/oitop?limit=10">/api/oitop?limit=10</a> - 持仓量Top10</li>
+        <li><a href="/api/anomalies/top?limit=10">/api/anomalies/top?limit=10</a></li>
+        <li><a href="/api/anomalies?anomaly_only=true&min_score=1.0">/api/anomalies?anomaly_only=true&min_score=1.0</a></li>
+    </ul>
+    """
+
+if __name__ == '__main__':
+    print("=== 币安异动检测 API 服务器 ===")
+    print("启动API服务器...")
+    print("访问 http://localhost:5000 查看API文档")
+    print("访问 http://localhost:5000/api/health 进行健康检查")
+    
+    app.run(host='0.0.0.0', port=5000, debug=False)
