@@ -22,12 +22,14 @@ setup_logging()
 
 # 为本模块创建单独的 logger -> 写文件但不向根 logger 传播（避免在控制台重复滚动）
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# 将 ws_collector 的默认级别设置为 WARNING，避免产生大量 INFO 日志写入文件或控制台。
+# 如果需要保留这些 INFO，可以改为 logging.DEBUG 并在 handler 上单独设置级别。
+logger.setLevel(logging.WARNING)
 if not getattr(logger, "_file_handler_attached", False):
     fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     fh.setFormatter(fmt)
-    fh.setLevel(logging.INFO)
+    fh.setLevel(logging.WARNING)
     logger.addHandler(fh)
     # 不向上级传播到根 logger 的 handler（从而不会在控制台显示）
     logger.propagate = False

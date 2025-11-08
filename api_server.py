@@ -24,6 +24,54 @@ except Exception:
 import logging
 logger = logging.getLogger(__name__)
 
+
+def format_update_time(val) -> str:
+    """把数据库或时间戳的 last_update 解析为中文格式字符串 'YYYY-MM-DD HH:MM:SS'.
+
+    支持输入形式：
+    - 整数或浮点（秒或毫秒）
+    - 数字字符串（秒或毫秒）
+    - ISO 格式字符串（如 '2025-11-08T08:51:37' 或 '2025-11-08 08:51:37')
+    否则返回原始字符串表示。
+    """
+    try:
+        # 直接处理数值（秒或毫秒）
+        if isinstance(val, (int, float)):
+            ts = int(val)
+            if ts > 1_000_000_000_000:  # 毫秒
+                ts = ts // 1000
+            return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+
+        # 字符串处理
+        if isinstance(val, str):
+            s = val.strip()
+            if s.isdigit():
+                ts = int(s)
+                if ts > 1_000_000_000_000:
+                    ts = ts // 1000
+                return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+            # 尝试解析 ISO 格式
+            try:
+                dt = datetime.fromisoformat(s)
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                # 回退：尝试常见带空格的时间格式
+                try:
+                    dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                    return dt.strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    return s
+
+    except Exception:
+        pass
+    # 最后回退为原始表示
+    return str(val)
+
+
+def get_update_time() -> str:
+    """返回中文格式的当前时间，供接口顶层 `update` 字段使用。"""
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """健康检查接口"""
@@ -35,6 +83,7 @@ def health_check():
         
         return jsonify({
             "status": "healthy",
+            "update": get_update_time(),
             "timestamp": int(time.time()),
             "server_time": datetime.now().isoformat(),
             "database": {
@@ -52,6 +101,7 @@ def health_check():
     except Exception as e:
         return jsonify({
             "status": "error",
+            "update": get_update_time(),
             "message": str(e),
             "timestamp": int(time.time())
         }), 500
@@ -119,6 +169,7 @@ def get_anomalies():
         
         return jsonify({
             "status": "success",
+            "update": get_update_time(),
             "count": len(filtered_anomalies),
             "data": filtered_anomalies,
             "filters": {
@@ -133,6 +184,7 @@ def get_anomalies():
     except Exception as e:
         return jsonify({
             "status": "error",
+            "update": get_update_time(),
             "message": str(e),
             "timestamp": int(time.time())
         }), 500
@@ -170,6 +222,7 @@ def get_top_anomalies():
         
         return jsonify({
             "status": "success",
+            "update": get_update_time(),
             "count": len(result),
             "data": result,
             "timestamp": int(time.time())
@@ -178,6 +231,7 @@ def get_top_anomalies():
     except Exception as e:
         return jsonify({
             "status": "error", 
+            "update": get_update_time(),
             "message": str(e)
         }), 500
 
@@ -204,6 +258,7 @@ def get_symbol_klines(symbol):
         
         return jsonify({
             "status": "success",
+            "update": get_update_time(),
             "symbol": symbol,
             "count": len(result),
             "data": result
@@ -212,6 +267,7 @@ def get_symbol_klines(symbol):
     except Exception as e:
         return jsonify({
             "status": "error",
+            "update": get_update_time(),
             "message": str(e)
         }), 500
 
@@ -240,10 +296,11 @@ def get_coins():
         
         return jsonify({
             "success": True,
+            "update": get_update_time(),
             "data": {
                 "coins": coins,
                 "count": len(coins),
-                "last_update": coins_data[0]['updated_at'] if coins_data else int(time.time()),
+                "last_update": format_update_time(coins_data[0]['updated_at'] if coins_data else int(time.time())),
                 "update_interval": "3分钟"
             }
         })
@@ -251,6 +308,7 @@ def get_coins():
     except Exception as e:
         return jsonify({
             "success": False,
+            "update": get_update_time(),
             "error": str(e)
         }), 500
 
@@ -281,12 +339,13 @@ def get_oi_top():
         
         return jsonify({
             "success": True,
+            "update": get_update_time(),
             "data": {
                 "positions": positions,
                 "count": len(positions),
                 "exchange": "binance",
                 "time_range": "24h",
-                "last_update": oi_data[0]['updated_at'] if oi_data else int(time.time()),
+                "last_update": format_update_time(oi_data[0]['updated_at'] if oi_data else int(time.time())),
                 "update_interval": "3分钟",
                 "note": "基于独立数据表，每3分钟更新"
             }
@@ -295,6 +354,7 @@ def get_oi_top():
     except Exception as e:
         return jsonify({
             "success": False,
+            "update": get_update_time(),
             "error": str(e)
         }), 500
 
@@ -310,18 +370,20 @@ def get_stats():
         
         return jsonify({
             "status": "success",
+            "update": get_update_time(),
             "data": {
                 "monitored_symbols": stats["symbol_count"],
                 "total_klines": stats["kline_count"],
                 "anomalies_24h": stats["anomaly_count_24h"],
                 "anomalies_1h": anomaly_count_1h,
-                "last_update": int(time.time())
+                "last_update": format_update_time(int(time.time()))
             }
         })
         
     except Exception as e:
         return jsonify({
             "status": "error",
+            "update": get_update_time(),
             "message": str(e)
         }), 500
 
