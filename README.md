@@ -144,27 +144,117 @@ python main.py
 ### 主要接口
 - **健康检查**：`GET /api/health` - 系统状态和数据库信息
 - **AI选币排行**：`GET /api/coins` - 基于多维度评分的选币建议
+  - 参数: `limit` (数量，默认10), `exchange` (交易所，默认binance)
 - **持仓量排行**：`GET /api/oitop` - 持仓量变化排行榜
+  - 参数: `limit` (数量，默认20), `exchange` (交易所，默认binance)
 - **异动数据**：`GET /api/anomalies/top` - 最新异动检测结果
-- **异动筛选**：`GET /api/anomalies?anomaly_only=true&min_score=1.0` - 按条件筛选异动
+  - 参数: `limit` (数量，默认20), `hours` (时间范围，默认24), `exchange` (交易所，默认binance)
+- **异动筛选**：`GET /api/anomalies` - 按条件筛选异动
+  - 参数: `interval` (间隔，默认15m), `hours` (时间范围，默认24), `limit` (数量，默认100), `min_score` (最小评分，默认0.0), `anomaly_only` (只显示异动，默认false), `exchange` (交易所，默认binance)
+- **K线数据**：`GET /api/symbols/{symbol}/klines` - 获取指定合约K线数据
+  - 参数: `limit` (K线数量，默认100)
+- **统计信息**：`GET /api/stats` - 系统运行统计信息
 
 ### API示例
 ```bash
-# 获取AI选币建议（前20个）
+# === 健康检查 ===
+# 查看系统健康状态和数据库信息
+curl "http://localhost:5000/api/health"
+
+# === AI选币排行 ===
+# 获取AI选币建议（默认前10个，币安交易所）
 curl "http://localhost:5000/api/coins"
 
-# 获取持仓量排行
+# 获取更多AI选币建议（前20个）
+curl "http://localhost:5000/api/coins?limit=20"
+
+# 获取Aster交易所的AI选币建议
+curl "http://localhost:5000/api/coins?limit=15&exchange=aster"
+
+# === 持仓量排行 ===
+# 获取持仓量排行（默认前20个，币安交易所）
 curl "http://localhost:5000/api/oitop"
 
-# 获取评分最高的异动
+# 获取前10个持仓量排行
+curl "http://localhost:5000/api/oitop?limit=10"
+
+# 获取Aster交易所的持仓量排行
+curl "http://localhost:5000/api/oitop?limit=15&exchange=aster"
+
+# === 异动数据查询 ===
+# 获取评分最高的异动（默认前20个，24小时内）
+curl "http://localhost:5000/api/anomalies/top"
+
+# 获取前10个最高评分异动
 curl "http://localhost:5000/api/anomalies/top?limit=10"
 
-# 获取显著异动（评分>2.0）
-curl "http://localhost:5000/api/anomalies?anomaly_only=true&min_score=2.0"
+# 获取12小时内的前15个异动
+curl "http://localhost:5000/api/anomalies/top?limit=15&hours=12"
 
-# 查看系统健康状态
-curl "http://localhost:5000/api/health"
+# 获取Aster交易所的异动数据
+curl "http://localhost:5000/api/anomalies/top?limit=10&exchange=aster"
+
+# === 异动筛选查询 ===
+# 获取所有异动数据（默认24小时内，前100个）
+curl "http://localhost:5000/api/anomalies"
+
+# 只获取显著异动（评分>1.0）
+curl "http://localhost:5000/api/anomalies?anomaly_only=true&min_score=1.0"
+
+# 获取高评分异动（评分>2.0），限制50个结果
+curl "http://localhost:5000/api/anomalies?anomaly_only=true&min_score=2.0&limit=50"
+
+# 获取12小时内的异动，15分钟间隔
+curl "http://localhost:5000/api/anomalies?hours=12&interval=15m&limit=200"
+
+# 获取Aster交易所的异动筛选
+curl "http://localhost:5000/api/anomalies?anomaly_only=true&min_score=1.5&exchange=aster"
+
+# === 单个合约K线数据 ===
+# 获取指定合约的K线数据（默认100条）
+curl "http://localhost:5000/api/symbols/BTCUSDT/klines"
+
+# 获取指定合约的最近50条K线
+curl "http://localhost:5000/api/symbols/ETHUSDT/klines?limit=50"
+
+# === 统计信息 ===
+# 获取系统统计信息
+curl "http://localhost:5000/api/stats"
 ```
+
+### API参数详解
+
+#### 通用参数
+- **exchange**: 交易所选择
+  - `binance` (默认): 币安交易所，返回所有监控的交易对
+  - `aster`: Aster交易所，只返回aster数据库中存在的交易对
+
+#### `/api/coins` - AI选币排行
+- **limit**: 返回结果数量，默认10，建议范围1-50
+- **exchange**: 交易所选择，默认binance
+
+#### `/api/oitop` - 持仓量排行  
+- **limit**: 返回结果数量，默认20，建议范围1-100
+- **exchange**: 交易所选择，默认binance
+
+#### `/api/anomalies/top` - 最高评分异动
+- **limit**: 返回结果数量，默认20，建议范围1-100
+- **hours**: 时间范围（小时），默认24，建议范围1-168（一周）
+- **exchange**: 交易所选择，默认binance
+
+#### `/api/anomalies` - 异动筛选查询
+- **interval**: K线间隔，默认15m，可选值: 15m, 5m, 1m
+- **hours**: 时间范围（小时），默认24，建议范围1-168
+- **limit**: 返回结果数量，默认100，建议范围1-1000
+- **min_score**: 最小异动评分，默认0.0，建议范围0.0-10.0
+- **anomaly_only**: 只返回异动数据，默认false
+  - `true`: 只返回有异动的数据（排除"正常"状态）
+  - `false`: 返回所有数据
+- **exchange**: 交易所选择，默认binance
+
+#### `/api/symbols/{symbol}/klines` - K线数据
+- **limit**: 返回K线数量，默认100，建议范围1-1000
+- **symbol**: 交易对符号，如BTCUSDT, ETHUSDT等
 
 ### 响应格式
 所有API返回JSON格式数据，包含：
