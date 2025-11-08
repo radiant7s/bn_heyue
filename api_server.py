@@ -72,6 +72,24 @@ def get_update_time() -> str:
     """返回中文格式的当前时间，供接口顶层 `update` 字段使用。"""
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+def get_aster_symbols() -> set:
+    """获取aster交易所支持的交易对集合"""
+    try:
+        aster_symbols = db.get_aster_symbols()
+        return {symbol['symbol'] for symbol in aster_symbols}
+    except Exception as e:
+        logger.error(f"获取aster交易对失败: {e}")
+        return set()
+
+def filter_symbols_by_exchange(symbols: List[str], exchange: str) -> List[str]:
+    """根据交易所过滤交易对"""
+    if exchange.lower() == 'aster':
+        aster_symbols = get_aster_symbols()
+        return [symbol for symbol in symbols if symbol in aster_symbols]
+    else:
+        # 其他交易所或binance，不过滤
+        return symbols
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """健康检查接口"""
@@ -116,13 +134,23 @@ def get_anomalies():
         limit = int(request.args.get('limit', 100))
         min_score = float(request.args.get('min_score', 0.0))
         anomaly_only = request.args.get('anomaly_only', 'false').lower() == 'true'
+        exchange = request.args.get('exchange', 'binance').lower()
         
         # 从数据库获取数据
         anomalies = db.get_recent_anomalies(interval_type, hours, limit * 2)  # 获取更多以便过滤
         
+        # 如果是aster交易所，获取支持的交易对
+        aster_symbols = set()
+        if exchange == 'aster':
+            aster_symbols = get_aster_symbols()
+        
         # 应用过滤器
         filtered_anomalies = []
         for anomaly in anomalies:
+            # 交易所过滤
+            if exchange == 'aster' and anomaly['symbol'] not in aster_symbols:
+                continue
+            
             # 分数过滤
             if anomaly['anomaly_score'] < min_score:
                 continue
@@ -176,7 +204,8 @@ def get_anomalies():
                 "interval_type": interval_type,
                 "hours": hours,
                 "min_score": min_score,
-                "anomaly_only": anomaly_only
+                "anomaly_only": anomaly_only,
+                "exchange": exchange
             },
             "timestamp": int(time.time())
         })
@@ -195,15 +224,26 @@ def get_top_anomalies():
     try:
         limit = int(request.args.get('limit', 20))
         hours = int(request.args.get('hours', 24))
+        exchange = request.args.get('exchange', 'binance').lower()
         
         # 获取数据并按评分排序
         anomalies = db.get_recent_anomalies("15m", hours, limit * 3)
         
-        # 过滤掉正常数据，只返回异动
-        top_anomalies = [
-            a for a in anomalies 
-            if a['anomaly_reasons'] != '正常' and a['anomaly_score'] > 0.5
-        ][:limit]
+        # 如果是aster交易所，获取支持的交易对
+        aster_symbols = set()
+        if exchange == 'aster':
+            aster_symbols = get_aster_symbols()
+        
+        # 过滤掉正常数据，只返回异动，并应用交易所过滤
+        top_anomalies = []
+        for a in anomalies:
+            if a['anomaly_reasons'] == '正常' or a['anomaly_score'] <= 0.5:
+                continue
+            if exchange == 'aster' and a['symbol'] not in aster_symbols:
+                continue
+            top_anomalies.append(a)
+        
+        top_anomalies = top_anomalies[:limit]
         
         result = []
         for anomaly in top_anomalies:
@@ -225,6 +265,7 @@ def get_top_anomalies():
             "update": get_update_time(),
             "count": len(result),
             "data": result,
+            "exchange": exchange,
             "timestamp": int(time.time())
         })
         
@@ -276,12 +317,23 @@ def get_coins():
     """获取高评分币种接口 - 用于AI选币决策（基于独立数据表）"""
     try:
         limit = int(request.args.get('limit',10))
-        # 从独立的ai_coins表获取数据
-        coins_data = db.get_ai_coins(limit)
+        exchange = request.args.get('exchange', 'binance').lower()
         
-        # 转换格式
+        # 从独立的ai_coins表获取数据
+        coins_data = db.get_ai_coins(limit * 2)  # 获取更多数据以便过滤
+        
+        # 如果是aster交易所，获取支持的交易对
+        aster_symbols = set()
+        if exchange == 'aster':
+            aster_symbols = get_aster_symbols()
+        
+        # 转换格式并过滤交易所
         coins = []
         for coin in coins_data:
+            # 交易所过滤
+            if exchange == 'aster' and coin['symbol'] not in aster_symbols:
+                continue
+                
             coin_result = {
                 "pair": coin['symbol'],
                 "score": round(coin['score'], 1),
@@ -293,6 +345,10 @@ def get_coins():
                 "increase_percent": round(coin['increase_percent'], 2)
             }
             coins.append(coin_result)
+            
+            # 限制数量
+            if len(coins) >= limit:
+                break
         
         return jsonify({
             "success": True,
@@ -300,6 +356,7 @@ def get_coins():
             "data": {
                 "coins": coins,
                 "count": len(coins),
+                "exchange": exchange,
                 "last_update": format_update_time(coins_data[0]['updated_at'] if coins_data else int(time.time())),
                 "update_interval": "3分钟"
             }
@@ -317,16 +374,26 @@ def get_oi_top():
     """获取持仓量Top20接口 - 基于独立数据表快速响应"""
     try:
         limit = int(request.args.get('limit', 20))
+        exchange = request.args.get('exchange', 'binance').lower()
         
         # 从独立的oi_rankings表获取数据
-        oi_data = db.get_oi_rankings(limit)
+        oi_data = db.get_oi_rankings(limit * 2)  # 获取更多数据以便过滤
         
-        # 转换格式
+        # 如果是aster交易所，获取支持的交易对
+        aster_symbols = set()
+        if exchange == 'aster':
+            aster_symbols = get_aster_symbols()
+        
+        # 转换格式并过滤交易所
         positions = []
         for oi in oi_data:
+            # 交易所过滤
+            if exchange == 'aster' and oi['symbol'] not in aster_symbols:
+                continue
+                
             position = {
                 "symbol": oi['symbol'],
-                "rank": oi['rank'],
+                "rank": len(positions) + 1,  # 重新排序
                 "current_oi": round(oi['current_oi'], 2),
                 "oi_delta": round(oi['oi_delta'], 2),
                 "oi_delta_percent": round(oi['oi_delta_percent'], 2),
@@ -336,6 +403,10 @@ def get_oi_top():
                 "net_short": round(oi['net_short'], 2)
             }
             positions.append(position)
+            
+            # 限制数量
+            if len(positions) >= limit:
+                break
         
         return jsonify({
             "success": True,
@@ -343,11 +414,11 @@ def get_oi_top():
             "data": {
                 "positions": positions,
                 "count": len(positions),
-                "exchange": "binance",
+                "exchange": exchange,
                 "time_range": "24h",
                 "last_update": format_update_time(oi_data[0]['updated_at'] if oi_data else int(time.time())),
                 "update_interval": "3分钟",
-                "note": "基于独立数据表，每3分钟更新"
+                "note": f"基于独立数据表，每3分钟更新，当前交易所：{exchange}"
             }
         })
         
@@ -397,22 +468,27 @@ def index():
         <li><code>GET /api/health</code> - 健康检查</li>
         <li><code>GET /api/anomalies</code> - 获取异动数据
             <ul>
-                <li>参数: interval=15m, hours=24, limit=100, min_score=0.0, anomaly_only=false</li>
+                <li>参数: interval=15m, hours=24, limit=100, min_score=0.0, anomaly_only=false, exchange=binance</li>
+                <li>exchange: binance(默认) | aster（当选择aster时，只返回aster交易所支持的交易对）</li>
             </ul>
         </li>
         <li><code>GET /api/anomalies/top</code> - 获取评分最高的异动
             <ul>
-                <li>参数: limit=20, hours=24</li>
+                <li>参数: limit=20, hours=24, exchange=binance</li>
+                <li>exchange: binance(默认) | aster</li>
             </ul>
         </li>
         <li><code>GET /api/coins</code> - 获取高评分币种（AI选币决策）
             <ul>
+                <li>参数: limit=10, exchange=binance</li>
+                <li>exchange: binance(默认) | aster</li>
                 <li>返回评分、价格、涨幅等数据</li>
             </ul>
         </li>
         <li><code>GET /api/oitop</code> - 获取持仓量Top20（市场热度分析）
             <ul>
-                <li>参数: limit=20</li>
+                <li>参数: limit=20, exchange=binance</li>
+                <li>exchange: binance(默认) | aster</li>
                 <li>返回持仓量、增长率、多空比等数据</li>
             </ul>
         </li>
@@ -427,10 +503,20 @@ def index():
     <h2>示例：</h2>
     <ul>
         <li><a href="/api/health">/api/health</a></li>
-        <li><a href="/api/coins">/api/coins</a> - AI选币接口</li>
-        <li><a href="/api/oitop?limit=10">/api/oitop?limit=10</a> - 持仓量Top10</li>
-        <li><a href="/api/anomalies/top?limit=10">/api/anomalies/top?limit=10</a></li>
+        <li><a href="/api/coins">/api/coins</a> - AI选币接口（币安）</li>
+        <li><a href="/api/coins?exchange=aster">/api/coins?exchange=aster</a> - AI选币接口（Aster）</li>
+        <li><a href="/api/oitop?limit=10">/api/oitop?limit=10</a> - 持仓量Top10（币安）</li>
+        <li><a href="/api/oitop?limit=10&exchange=aster">/api/oitop?limit=10&exchange=aster</a> - 持仓量Top10（Aster）</li>
+        <li><a href="/api/anomalies/top?limit=10">/api/anomalies/top?limit=10</a> - 异动Top10（币安）</li>
+        <li><a href="/api/anomalies/top?limit=10&exchange=aster">/api/anomalies/top?limit=10&exchange=aster</a> - 异动Top10（Aster）</li>
         <li><a href="/api/anomalies?anomaly_only=true&min_score=1.0">/api/anomalies?anomaly_only=true&min_score=1.0</a></li>
+        <li><a href="/api/anomalies?anomaly_only=true&min_score=1.0&exchange=aster">/api/anomalies?anomaly_only=true&min_score=1.0&exchange=aster</a> - 异动数据（Aster）</li>
+    </ul>
+    
+    <h2>交易所支持：</h2>
+    <ul>
+        <li><strong>binance</strong>: 币安交易所（默认），返回所有数据</li>
+        <li><strong>aster</strong>: Aster交易所，只返回aster数据库中存在的交易对</li>
     </ul>
     """
 
