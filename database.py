@@ -163,6 +163,18 @@ class Database:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_rankings_rank ON oi_rankings(rank ASC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_coins_updated ON ai_coins(updated_at DESC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_rankings_updated ON oi_rankings(updated_at DESC)")
+                # Aster 交易所合约表，用于存储从 exchangeInfo 下载的合约信息
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS aster (
+                        symbol TEXT PRIMARY KEY,
+                        status TEXT,
+                        baseAsset TEXT,
+                        quoteAsset TEXT,
+                        raw_json TEXT,
+                        updated_at INTEGER
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_aster_updated ON aster(updated_at DESC)")
                 
                 conn.commit()
             finally:
@@ -593,6 +605,66 @@ class Database:
                 conn.commit()
             finally:
                 conn.close()
+
+    # ===== Aster 合约表操作 =====
+    def replace_aster_symbols(self, symbols: List[Dict]):
+        """用一组 symbol dict 完整替换 aster 表中的内容。
+
+        symbols: 每个元素应包含至少 'symbol' 字段，可包含 baseAsset, quoteAsset, status, raw_json
+        """
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                # 使用事务：先删除再批量插入，保证表与 json 文件一致
+                conn.execute("DELETE FROM aster")
+                stmt = "INSERT OR REPLACE INTO aster (symbol, status, baseAsset, quoteAsset, raw_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                now = int(time.time())
+                data = []
+                for s in symbols:
+                    symbol = s.get('symbol')
+                    status = s.get('status')
+                    base = s.get('baseAsset') or s.get('base') or None
+                    quote = s.get('quoteAsset') or s.get('quote') or None
+                    raw = None
+                    try:
+                        import json as _json
+                        raw = _json.dumps(s, ensure_ascii=False)
+                    except Exception:
+                        raw = None
+                    data.append((symbol, status, base, quote, raw, now))
+
+                if data:
+                    conn.executemany(stmt, data)
+                conn.commit()
+            finally:
+                conn.close()
+
+    def get_aster_symbols(self) -> List[Dict]:
+        """返回 aster 表中存储的合约列表（raw_json 已解析为 dict when possible）。"""
+        conn = self.get_connection()
+        try:
+            cursor = conn.execute("SELECT symbol, status, baseAsset, quoteAsset, raw_json, updated_at FROM aster ORDER BY symbol")
+            rows = cursor.fetchall()
+            result = []
+            import json as _json
+            for r in rows:
+                item = {
+                    'symbol': r['symbol'],
+                    'status': r['status'],
+                    'baseAsset': r['baseAsset'],
+                    'quoteAsset': r['quoteAsset'],
+                    'updated_at': r['updated_at']
+                }
+                raw = r['raw_json']
+                if raw:
+                    try:
+                        item['raw'] = _json.loads(raw)
+                    except Exception:
+                        item['raw'] = raw
+                result.append(item)
+            return result
+        finally:
+            conn.close()
 
 # 全局数据库实例 - 使用配置文件设置
 db = Database()

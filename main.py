@@ -13,7 +13,7 @@ from datetime import datetime
 
 from ws_collector import start_collector_background
 from anomaly_detector import start_detector_background
-from data_updater import start_updater_background
+from data_updater import start_updater_background, download_and_store_aster
 from api_server import app
 from log_config import setup_logging
 import logging
@@ -70,6 +70,16 @@ class SystemManager:
         logger.info("")
         
         try:
+            # 启动时先下载并更新 Aster exchangeInfo
+            try:
+                ok = download_and_store_aster()
+                if ok:
+                    logger.info("Aster exchangeInfo 下载并写入数据库完成")
+                else:
+                    logger.warning("Aster exchangeInfo 下载或写入数据库失败（见日志）")
+            except Exception:
+                logger.exception("启动时执行 Aster exchangeInfo 更新出错")
+
             # 1. 启动WebSocket数据收集器
             logger.info("1. 启动WebSocket数据收集器...")
             self.collector = start_collector_background()

@@ -246,6 +246,64 @@ def start_updater_background():
     return updater
 
 
+def download_and_store_aster(save_path: str = "json/aster_exchangeInfo.json") -> bool:
+    """下载 Aster exchangeInfo 并保存到本地 JSON 文件，同时把 symbols 写入数据库 aster 表。
+
+    返回 True 表示成功，False 表示失败。
+    """
+    try:
+        url = "https://fapi.asterdex.com/fapi/v1/exchangeInfo"
+        logger.info(f"下载 Aster exchangeInfo: {url}")
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+
+        # 确保目录存在
+        import os, json
+        dirpath = os.path.dirname(save_path)
+        if dirpath and not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
+
+        # # 写入文件
+        # with open(save_path, "w", encoding="utf-8") as f:
+        #     json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        # 提取 symbols 并写入数据库
+        symbols = payload.get('symbols') or []
+        simple_symbols = []
+        for s in symbols:
+            # 保留常用字段
+            simple_symbols.append({
+                'symbol': s.get('symbol'),
+                'status': s.get('status'),
+                'baseAsset': s.get('baseAsset'),
+                'quoteAsset': s.get('quoteAsset'),
+                # include full raw for db method to store
+                **({'raw': s} if s else {})
+            })
+
+        if simple_symbols:
+            try:
+                # 写入数据库
+                from database import db
+                # build list expected by replace_aster_symbols
+                db.replace_aster_symbols([{
+                    'symbol': item.get('symbol'),
+                    'status': item.get('status'),
+                    'baseAsset': item.get('baseAsset'),
+                    'quoteAsset': item.get('quoteAsset'),
+                    'raw': item.get('raw')
+                } for item in simple_symbols])
+                logger.info(f"已将 {len(simple_symbols)} 个 Aster 合约写入数据库")
+            except Exception:
+                logger.exception("写入 Aster 合约到数据库失败")
+
+        return True
+    except Exception:
+        logger.exception("下载或保存 Aster exchangeInfo 失败")
+        return False
+
+
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     logger.info("=== 独立数据更新器 ===")
