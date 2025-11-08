@@ -9,10 +9,257 @@ import json
 import time
 import threading
 import requests
+import logging
 from typing import List, Dict
 import websocket
 
 from database import db
+from log_config import setup_logging, LOG_FILE
+from logging.handlers import RotatingFileHandler
+
+# 初始化日志（幂等）
+setup_logging()
+
+# 为本模块创建单独的 logger -> 写文件但不向根 logger 传播（避免在控制台重复滚动）
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not getattr(logger, "_file_handler_attached", False):
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)
+    logger.addHandler(fh)
+    # 不向上级传播到根 logger 的 handler（从而不会在控制台显示）
+    logger.propagate = False
+    logger._file_handler_attached = True
+
+
+class BinanceWSCollector:
+    def __init__(self):
+        self.ws = None
+        self.symbols = []
+        self.running = False
+        self.reconnect_count = 0
+        self.max_reconnects = 10
+        
+        # 配置
+        self.config = {
+            "MIN_VOL_24H": 5000.0,  # 最小24h成交量筛选
+            "TOP_N_SYMBOLS": 150,   # 监控的合约数量
+            "HISTORY_KLINES": 16,   # 初始化时获取的历史K线数量
+        }
+    
+    def fetch_initial_klines(self, symbols: List[str]):
+        """获取所有合约的初始历史K线数据（仅当不足时才获取）"""
+        logger.info(f"检查 {len(symbols)} 个合约的历史K线数据...")
+        
+        symbols_to_fetch = []
+        for symbol in symbols:
+            current_count = db.get_symbol_kline_count(symbol)
+            if current_count < self.config["HISTORY_KLINES"]:
+                symbols_to_fetch.append(symbol)
+                logger.info(f"  {symbol}: 当前{current_count}条，需要补充")
+            else:
+                logger.info(f"  {symbol}: 已有{current_count}条，跳过")
+        
+        if not symbols_to_fetch:
+            logger.info("所有合约都有足够的历史数据，跳过初始化步骤")
+            return
+        
+        logger.info(f"需要获取历史数据的合约: {len(symbols_to_fetch)}个")
+        total = len(symbols_to_fetch)
+        for idx, symbol in enumerate(symbols_to_fetch, 1):
+            try:
+                logger.info(f"[{idx}/{total}] 获取 {symbol} 历史K线...")
+                url = "https://fapi.binance.com/fapi/v1/klines"
+                params = {"symbol": symbol, "interval": "15m", "limit": self.config["HISTORY_KLINES"]}
+                r = requests.get(url, params=params, timeout=10)
+                r.raise_for_status()
+                klines_data = r.json()
+
+                saved_count = 0
+                for kline_raw in klines_data:
+                    kline_record = {
+                        "open_time": int(kline_raw[0]),
+                        "close_time": int(kline_raw[6]),
+                        "open_price": float(kline_raw[1]),
+                        "high_price": float(kline_raw[2]),
+                        "low_price": float(kline_raw[3]),
+                        "close_price": float(kline_raw[4]),
+                        "volume": float(kline_raw[5]),
+                        "quote_volume": float(kline_raw[7]),
+                        "trades_count": int(kline_raw[8])
+                    }
+                    db.insert_kline(symbol, kline_record)
+                    saved_count += 1
+
+                logger.info(f" ✓ {saved_count}条")
+                time.sleep(0.05)
+            except Exception:
+                logger.exception(f"获取 {symbol} 历史K线失败")
+                continue
+
+        logger.info("历史K线数据初始化完成!")
+        stats = db.get_symbol_stats()
+        logger.info(f"数据库统计: {stats['symbol_count']}个合约, {stats['kline_count']}条K线数据")
+    
+    def get_active_symbols(self) -> List[str]:
+        """获取活跃的USDT永续合约列表"""
+        logger.info("获取活跃合约列表...")
+        exchange_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        r = requests.get(exchange_url, timeout=10)
+        r.raise_for_status()
+        exchange_data = r.json()
+
+        perpetual_symbols = [
+            s["symbol"] for s in exchange_data.get("symbols", [])
+            if (s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING")
+        ]
+
+        ticker_url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        r = requests.get(ticker_url, timeout=10)
+        r.raise_for_status()
+        ticker_data = r.json()
+
+        symbol_volumes = {}
+        for ticker in ticker_data:
+            symbol = ticker["symbol"]
+            if symbol in perpetual_symbols:
+                quote_volume = float(ticker.get("quoteVolume", 0) or 0)
+                if quote_volume >= self.config["MIN_VOL_24H"]:
+                    symbol_volumes[symbol] = quote_volume
+
+        sorted_symbols = sorted(symbol_volumes.items(), key=lambda x: x[1], reverse=True)
+        top_symbols = [symbol for symbol, _ in sorted_symbols[:self.config["TOP_N_SYMBOLS"]]]
+        logger.info(f"筛选出 {len(top_symbols)} 个活跃合约（24h成交额 >= {self.config['MIN_VOL_24H']} USDT）")
+        return top_symbols
+    
+    def create_stream_url(self, symbols: List[str]) -> str:
+        streams = [f"{symbol.lower()}@kline_15m" for symbol in symbols]
+        base_url = "wss://fstream.binance.com/stream?streams="
+        return base_url + "/".join(streams)
+
+    def on_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            kline_data = data.get("data", {}).get("k", {})
+            if not kline_data:
+                return
+
+            symbol = kline_data["s"]
+            is_closed = kline_data.get("x", False)
+
+            kline_record = {
+                "open_time": int(kline_data["t"]),
+                "close_time": int(kline_data["T"]),
+                "open_price": float(kline_data["o"]),
+                "high_price": float(kline_data["h"]),
+                "low_price": float(kline_data["l"]),
+                "close_price": float(kline_data["c"]),
+                "volume": float(kline_data["v"]),
+                "quote_volume": float(kline_data["q"]),
+                "trades_count": int(kline_data["n"])
+            }
+
+            db.insert_kline(symbol, kline_record)
+            current_time = time.strftime("%H:%M:%S")
+            status = "闭合" if is_closed else "更新"
+            logger.info(f"[{current_time}] {symbol} 15m K线{status}: {kline_record['close_price']:.4f}, 成交额: {kline_record['quote_volume']:.0f}")
+        except Exception:
+            logger.exception("处理消息错误")
+
+    def on_error(self, ws, error):
+        logger.error(f"WebSocket错误: {error}")
+
+    def on_close(self, ws, close_status_code, close_msg):
+        logger.warning(f"WebSocket连接关闭: {close_status_code}, {close_msg}")
+        if self.running and self.reconnect_count < self.max_reconnects:
+            logger.info(f"准备重连... (第{self.reconnect_count + 1}次)")
+            time.sleep(5)
+            self.reconnect_count += 1
+            self.start()
+
+    def on_open(self, ws):
+        logger.info("WebSocket连接已建立")
+        self.reconnect_count = 0
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        try:
+            self.symbols = self.get_active_symbols()
+            if not self.symbols:
+                logger.warning("没有找到符合条件的合约")
+                return
+
+            self.fetch_initial_klines(self.symbols)
+            url = self.create_stream_url(self.symbols)
+            logger.info(f"连接到: {url[:100]}...")
+
+            self.ws = websocket.WebSocketApp(
+                url,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+                on_open=self.on_open
+            )
+
+            self.ws.run_forever()
+        except Exception:
+            logger.exception("启动WebSocket收集器失败")
+            self.running = False
+
+    def stop(self):
+        self.running = False
+        if self.ws:
+            self.ws.close()
+        logger.info("WebSocket收集器已停止")
+
+
+def start_collector_background():
+    collector = BinanceWSCollector()
+
+    def run_collector():
+        while True:
+            try:
+                collector.start()
+            except Exception:
+                logger.exception("收集器异常")
+                time.sleep(10)
+
+    thread = threading.Thread(target=run_collector, daemon=True)
+    thread.start()
+    return collector
+
+
+if __name__ == '__main__':
+    logger.info("=== 币安WebSocket数据收集器 ===")
+    collector = BinanceWSCollector()
+    try:
+        collector.start()
+    except KeyboardInterrupt:
+        logger.info("\n收到中断信号，正在停止...")
+        collector.stop()
+#!/usr/bin/env python3
+"""
+ws_collector.py - WebSocket数据收集器
+
+通过币安WebSocket实时收集15分钟K线数据并存储到数据库
+"""
+
+import json
+import time
+import threading
+import requests
+from typing import List, Dict
+import websocket
+
+from database import db
+from log_config import setup_logging
+
+# 初始化日志（幂等）
+setup_logging()
 
 class BinanceWSCollector:
     def __init__(self):
@@ -178,7 +425,7 @@ class BinanceWSCollector:
             
             current_time = time.strftime("%H:%M:%S")
             status = "闭合" if is_closed else "更新"
-            print(f"[{current_time}] {symbol} 15m K线{status}: {kline_record['close_price']:.4f}, 成交额: {kline_record['quote_volume']:.0f}")
+            logger.info(f"[{current_time}] {symbol} 15m K线{status}: {kline_record['close_price']:.4f}, 成交额: {kline_record['quote_volume']:.0f}")
             
         except Exception as e:
             print(f"处理消息错误: {e}")

@@ -15,6 +15,14 @@ from database import db
 
 app = Flask(__name__)
 CORS(app)  # 允许跨域请求
+try:
+    # 设置日志（幂等）
+    from log_config import setup_logging
+    setup_logging()
+except Exception:
+    pass
+import logging
+logger = logging.getLogger(__name__)
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -365,9 +373,9 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("=== 币安异动检测 API 服务器 ===")
-    print("启动API服务器...")
-    print("访问 http://localhost:5000 查看API文档")
-    print("访问 http://localhost:5000/api/health 进行健康检查")
+    logger.info("=== 币安异动检测 API 服务器 ===")
+    logger.info("启动API服务器...")
+    logger.info("访问 http://localhost:5000 查看API文档")
+    logger.info("访问 http://localhost:5000/api/health 进行健康检查")
     
     app.run(host='0.0.0.0', port=5000, debug=False)

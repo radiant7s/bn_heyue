@@ -13,6 +13,12 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 from database import db
+from log_config import setup_logging
+
+# 初始化日志（幂等）
+setup_logging()
+import logging
+logger = logging.getLogger(__name__)
 
 class AnomalyDetector:
     def __init__(self):
@@ -48,8 +54,8 @@ class AnomalyDetector:
             for ticker in r.json():
                 volumes[ticker["symbol"]] = float(ticker.get("quoteVolume", 0) or 0)
             return volumes
-        except Exception as e:
-            print(f"获取24h成交额失败: {e}")
+        except Exception:
+            logger.exception("获取24h成交额失败")
             return {}
     
     def analyze_symbol_anomaly(self, symbol: str, klines: List[Dict], quote_volume_24h: float = 0) -> Optional[Dict]:
@@ -161,14 +167,14 @@ class AnomalyDetector:
                 "is_anomaly": is_anomaly
             }
             
-        except Exception as e:
-            print(f"分析 {symbol} 异动时出错: {e}")
+        except Exception:
+            logger.exception(f"分析 {symbol} 异动时出错")
             return None
     
     def detect_anomalies(self):
         """检测所有合约的异动"""
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始异动检测...")
-        
+        logger.info(f"[{datetime.now().strftime('%H:%M:%S')}] 开始异动检测...")
+
         try:
             # 获取24h成交额数据
             volumes_24h = self.get_24h_volumes()
@@ -201,30 +207,29 @@ class AnomalyDetector:
                         
                         if result["is_anomaly"]:
                             anomaly_count += 1
-                            print(f"  异动: {symbol} ({result['anomaly_reasons']}) 评分={result['anomaly_score']:.2f}")
+                            logger.info(f"  异动: {symbol} ({result['anomaly_reasons']}) 评分={result['anomaly_score']:.2f}")
                 
-                except Exception as e:
-                    print(f"处理 {symbol} 时出错: {e}")
+                except Exception:
+                    logger.exception(f"处理 {symbol} 时出错")
             
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 异动检测完成: {total_processed}个合约, {anomaly_count}个异动")
+            logger.info(f"[{datetime.now().strftime('%H:%M:%S')}] 异动检测完成: {total_processed}个合约, {anomaly_count}个异动")
             
-        except Exception as e:
-            print(f"异动检测出错: {e}")
+        except Exception:
+            logger.exception("异动检测出错")
     
     def start(self):
         """启动异动检测任务"""
         if self.running:
             return
-        
         self.running = True
-        print("异动检测器已启动")
-        
+        logger.info("异动检测器已启动")
+
         # 立即执行一次
         self.detect_anomalies()
-        
+
         # 安排定时任务 - 每分钟执行一次
         schedule.every().minute.do(self.detect_anomalies)
-        
+
         # 运行调度器
         while self.running:
             schedule.run_pending()
@@ -234,7 +239,7 @@ class AnomalyDetector:
         """停止异动检测任务"""
         self.running = False
         schedule.clear()
-        print("异动检测器已停止")
+        logger.info("异动检测器已停止")
 
 def start_detector_background():
     """在后台线程启动异动检测器"""
@@ -244,19 +249,20 @@ def start_detector_background():
         try:
             detector.start()
         except Exception as e:
-            print(f"异动检测器异常: {e}")
+            logger.exception("异动检测器异常")
     
     thread = threading.Thread(target=run_detector, daemon=True)
     thread.start()
     return detector
 
 if __name__ == "__main__":
-    print("=== 异动检测器 ===")
-    
+    logger = logging.getLogger(__name__)
+    logger.info("=== 异动检测器 ===")
+
     detector = AnomalyDetector()
-    
+
     try:
         detector.start()
     except KeyboardInterrupt:
-        print("\n收到中断信号，正在停止...")
+        logger.info("\n收到中断信号，正在停止...")
         detector.stop()
