@@ -313,16 +313,29 @@ def download_and_store_aster(save_path: str = "json/aster_exchangeInfo.json") ->
         # 提取 symbols 并写入数据库
         symbols = payload.get('symbols') or []
         simple_symbols = []
+        kept, skipped = 0, 0
         for s in symbols:
-            # 保留常用字段
+            # Aster 返回的字段可能包含 status 或 contractStatus，两者等价，这里统一取
+            status = s.get('status') or s.get('contractStatus')
+            contract_type = s.get('contractType')  # 可能为 PERPETUAL 等
+
+            # 只保留状态为 TRADING 的合约（忽略 PENDING_TRADING / PRE_SETTLE / SETTLING / CLOSE）
+            if status != 'TRADING':
+                skipped += 1
+                continue
+
             simple_symbols.append({
                 'symbol': s.get('symbol'),
-                'status': s.get('status'),
+                'status': status,
                 'baseAsset': s.get('baseAsset'),
                 'quoteAsset': s.get('quoteAsset'),
+                'contractType': contract_type,
                 # include full raw for db method to store
                 **({'raw': s} if s else {})
             })
+            kept += 1
+
+        logger.info(f"Aster 合约总数: {len(symbols)}, 保留 TRADING 状态: {kept}, 已跳过非交易状态: {skipped}")
 
         if simple_symbols:
             try:
@@ -336,7 +349,7 @@ def download_and_store_aster(save_path: str = "json/aster_exchangeInfo.json") ->
                     'quoteAsset': item.get('quoteAsset'),
                     'raw': item.get('raw')
                 } for item in simple_symbols])
-                logger.info(f"已将 {len(simple_symbols)} 个 Aster 合约写入数据库")
+                logger.info(f"已写入 {len(simple_symbols)} 个 Aster TRADING 合约到数据库")
             except Exception:
                 logger.exception("写入 Aster 合约到数据库失败")
 

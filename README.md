@@ -229,6 +229,25 @@ curl "http://localhost:5000/api/stats"
   - `binance` (默认): 币安交易所，返回所有监控的交易对
   - `aster`: Aster交易所，只返回aster数据库中存在的交易对
 
+### Aster 交易所数据说明
+
+系统启动时会自动抓取 Aster 的 `exchangeInfo`，并将其支持的合约写入本地数据库的 `aster` 表。为保证后续基于 `exchange=aster` 的过滤只出现可正常交易的合约，初始化时只保存状态为 `TRADING` 的合约，其它状态将被忽略：
+
+| 字段 | 说明 |
+|------|------|
+| `FUTURE` | 交易对类型 (type) |
+| `PERPETUAL` | 合约类型 (contractType) 永续合约 |
+| `status` / `contractStatus` | 合约状态字段（可能存在任一名称） |
+
+合约状态枚举：
+- `PENDING_TRADING` 待上市（忽略）
+- `TRADING` 交易中（保留）
+- `PRE_SETTLE` 预结算（忽略）
+- `SETTLING` 结算中（忽略）
+- `CLOSE` 已下架（忽略）
+
+因此，`exchange=aster` 相关接口（如 `/api/coins?exchange=aster`, `/api/anomalies/top?exchange=aster` 等）仅在本地数据库中存在且状态为 `TRADING` 的合约才会出现在返回结果中。
+
 #### `/api/coins` - AI选币排行
 - **limit**: 返回结果数量，默认10，建议范围1-50
 - **exchange**: 交易所选择，默认binance
