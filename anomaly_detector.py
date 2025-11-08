@@ -28,7 +28,7 @@ class AnomalyDetector:
             "PRICE_PERCENTILE": 92.0,
             "VOLUME_Z_THRESHOLD": 2.0,
             "VOLATILITY_Z_THRESHOLD": 2.0,
-            "MIN_ABS_RETURN": 0.01,
+            "MIN_ABS_RETURN": 0.005,
             
             # 综合评分权重
             "WEIGHT_PRICE": 0.4,
@@ -37,7 +37,7 @@ class AnomalyDetector:
             "ANOMALY_SCORE_THRESHOLD": 0.5,  # 降低阈值，让更多数据被记录
             
             # 数据要求
-            "MIN_KLINES_REQUIRED": 50,  # 最少需要的K线数量
+            "MIN_KLINES_REQUIRED": 16,  # 最少需要的K线数量（调整为与收集器初始化数量一致）
         }
         
         self.running = False
