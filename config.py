@@ -21,6 +21,28 @@ DATABASE_CONFIG = {
     "max_klines_per_symbol": 10000,
 }
 
+# 网络配置
+NETWORK_CONFIG = {
+    # HTTP请求超时时间（秒）
+    "timeout": 15,
+    
+    # 最大重试次数
+    "max_retries": 3,
+    
+    # 重试间隔因子
+    "backoff_factor": 1.0,
+    
+    # 连接池配置
+    "pool_connections": 10,
+    "pool_maxsize": 20,
+    
+    # 数据更新间隔（秒）
+    "update_interval": 180,  # 3分钟
+    
+    # 异动检测间隔（秒）
+    "anomaly_check_interval": 60,  # 1分钟
+}
+
 # 日志配置
 LOGGING_CONFIG = {
     "level": "INFO",

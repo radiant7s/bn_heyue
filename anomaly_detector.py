@@ -9,6 +9,9 @@ import time
 import threading
 import schedule
 import numpy as np
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -41,13 +44,41 @@ class AnomalyDetector:
         }
         
         self.running = False
+        
+        # 配置HTTP会话和重试策略
+        self.session = requests.Session()
+        
+        # 配置重试策略
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+        
+        # 配置HTTP适配器
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=5,
+            pool_maxsize=10,
+            pool_block=False
+        )
+        
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # 设置默认头部
+        self.session.headers.update({
+            'User-Agent': 'python-requests/2.31.0',
+            'Connection': 'keep-alive',
+            'Accept': 'application/json'
+        })
     
     def get_24h_volumes(self) -> Dict[str, float]:
         """获取24小时成交额数据（用于排序）"""
         try:
-            import requests
             url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-            r = requests.get(url, timeout=10)
+            r = self.session.get(url, timeout=15)
             r.raise_for_status()
             
             volumes = {}
@@ -239,6 +270,9 @@ class AnomalyDetector:
         """停止异动检测任务"""
         self.running = False
         schedule.clear()
+        # 关闭session连接
+        if hasattr(self, 'session'):
+            self.session.close()
         logger.info("异动检测器已停止")
 
 def start_detector_background():

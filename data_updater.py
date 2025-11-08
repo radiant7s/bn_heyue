@@ -14,6 +14,8 @@ data_updater.py - 独立数据更新器
 import time
 import threading
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import numpy as np
 import logging
 from typing import List, Dict
@@ -32,12 +34,41 @@ class DataUpdater:
         self.running = False
         self.update_interval = 180  # 3分钟
         self.top_n_symbols = 20  # 每个表最多20个币种
+        
+        # 配置HTTP会话和重试策略
+        self.session = requests.Session()
+        
+        # 配置重试策略
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+        
+        # 配置HTTP适配器
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,
+            pool_maxsize=20,
+            pool_block=False
+        )
+        
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # 设置默认超时和头部
+        self.session.headers.update({
+            'User-Agent': 'python-requests/2.31.0',
+            'Connection': 'keep-alive',
+            'Accept': 'application/json'
+        })
 
     def get_active_symbols(self) -> List[str]:
         """获取活跃合约列表"""
         try:
             url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-            r = requests.get(url, timeout=10)
+            r = self.session.get(url, timeout=15)
             r.raise_for_status()
             tickers = r.json()
 
@@ -93,7 +124,8 @@ class DataUpdater:
                 return
 
             url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-            r = requests.get(url, timeout=10)
+            r = self.session.get(url, timeout=15)
+            r.raise_for_status()
             ticker_data = {t['symbol']: t for t in r.json()}
 
             coin_scores = []
@@ -154,9 +186,10 @@ class DataUpdater:
                 return
 
             url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-            r = requests.get(url, timeout=10)
+            r = self.session.get(url, timeout=15)
+            r.raise_for_status()
             ticker_data = {t['symbol']: t for t in r.json()}
-
+            
             oi_data = []
             for symbol in symbols[:30]:
                 try:
@@ -231,6 +264,9 @@ class DataUpdater:
     def stop(self):
         """停止数据更新器"""
         self.running = False
+        # 关闭session连接
+        if hasattr(self, 'session'):
+            self.session.close()
         logger.info("数据更新器已停止")
 
 
@@ -252,9 +288,15 @@ def download_and_store_aster(save_path: str = "json/aster_exchangeInfo.json") ->
     返回 True 表示成功，False 表示失败。
     """
     try:
+        # 创建一个临时会话用于下载
+        session = requests.Session()
+        adapter = HTTPAdapter(max_retries=3)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
         url = "https://fapi.asterdex.com/fapi/v1/exchangeInfo"
         logger.info(f"下载 Aster exchangeInfo: {url}")
-        r = requests.get(url, timeout=15)
+        r = session.get(url, timeout=15)
         r.raise_for_status()
         payload = r.json()
 
